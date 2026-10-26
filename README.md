@@ -1,1 +1,1 @@
-Cleanind data in sql
+Cleaning data in SQL
