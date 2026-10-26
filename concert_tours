@@ -1,0 +1,139 @@
+/* =====================================================================
+   CLEANING SCRIPT: concert_tours
+   Source: List of highest-grossing concert tours by Women (CSV) 
+
+   HOW TO USE
+   - Run on a freshly imported table where the messy columns are still TEXT.
+   - Run section by section, top to bottom. Each section ends with a check.
+   - Do NOT re-run a section once it has worked: the columns will already be
+     numbers, and text functions like split_part() will fail on them.
+
+   SECTIONS
+   1. Split the year range into start_year and end_year
+   2. Convert gross columns from TEXT to BIGINT
+   3. Clean and convert peak, all_time_peak and ref
+   4. Clean the text columns: artist and tour_title
+   5. Recalculate average_gross
+   6. Final check
+   ===================================================================== */
+
+
+/* ---------------------------------------------------------------------
+   1. YEAR: split "2023-2024" into start_year and end_year
+   - First 4-digit number = start_year
+   - Second 4-digit number = end_year (if only one year, end_year = start_year)
+   - The garbled dash between the years is ignored
+   --------------------------------------------------------------------- */
+
+ALTER TABLE concert_tours
+    ADD COLUMN start_year INT,
+    ADD COLUMN end_year   INT;
+
+UPDATE concert_tours
+SET start_year = (regexp_match(year, '\d{4}'))[1]::INT,
+    end_year   = COALESCE(
+                     (regexp_match(year, '\d{4}\D+(\d{4})'))[1],
+                     (regexp_match(year, '\d{4}'))[1]
+                 )::INT;
+
+-- Check, then drop the original text column
+SELECT year, start_year, end_year FROM concert_tours ;
+
+ALTER TABLE concert_tours
+    DROP COLUMN year;
+
+
+/* ---------------------------------------------------------------------
+   2. GROSS COLUMNS: TEXT -> BIGINT
+   Steps, from the inside out:
+   - split_part(col, '[', 1)  keeps text before any "[" (removes footnotes)
+   - REPLACE(..., '$', '')    removes the dollar sign
+   - REPLACE(..., ',', '')    removes the commas
+   - NULLIF(..., '')          turns blank cells into NULL (an empty string
+                              cannot be cast to a number)
+   - CAST(... AS BIGINT)      converts the text to a number
+   --------------------------------------------------------------------- */
+
+ALTER TABLE concert_tours
+    ALTER COLUMN actual_gross TYPE BIGINT
+    USING CAST(
+        NULLIF(REPLACE(REPLACE(split_part(actual_gross, '[', 1), '$', ''), ',', ''), '')
+    AS BIGINT),
+
+    ALTER COLUMN adjusted_gross TYPE BIGINT
+    USING CAST(
+        NULLIF(REPLACE(REPLACE(split_part(adjusted_gross, '[', 1), '$', ''), ',', ''), '')
+    AS BIGINT),
+
+    ALTER COLUMN average_gross TYPE BIGINT
+    USING CAST(
+        NULLIF(REPLACE(REPLACE(split_part(average_gross, '[', 1), '$', ''), ',', ''), '')
+    AS BIGINT);
+
+SELECT actual_gross, adjusted_gross, average_gross FROM concert_tours;
+
+
+/* ---------------------------------------------------------------------
+   3. PEAK, ALL_TIME_PEAK, REF: remove junk, then convert to numbers
+   --------------------------------------------------------------------- */
+
+-- 3a. Remove square brackets
+UPDATE concert_tours SET peak          = REPLACE(REPLACE(peak,          '[', ''), ']', '');
+UPDATE concert_tours SET all_time_peak = REPLACE(REPLACE(all_time_peak, '[', ''), ']', '');
+UPDATE concert_tours SET ref           = REPLACE(REPLACE(ref,           '[', ''), ']', '');
+
+-- 3b. Remove stray letters (e.g. the "c" in "2c" on peak, the "d" in ref)
+UPDATE concert_tours SET peak = REPLACE(peak, 'c', '');
+UPDATE concert_tours SET ref  = REPLACE(ref,  'd', '');
+
+-- 3c. Convert to numbers
+ALTER TABLE concert_tours
+    ALTER COLUMN peak TYPE INT
+    USING peak::INT;
+
+ALTER TABLE concert_tours
+    ALTER COLUMN all_time_peak TYPE INT
+    USING all_time_peak::INT;
+
+-- ref: take the first block of 1 to 4 digits; blanks and letters become NULL
+ALTER TABLE concert_tours
+    ALTER COLUMN ref TYPE SMALLINT
+    USING NULLIF(substring(ref from '\d{1,4}'), '')::SMALLINT;
+
+SELECT peak, all_time_peak, ref FROM concert_tours ;
+
+
+/* ---------------------------------------------------------------------
+   4. TEXT COLUMNS
+   --------------------------------------------------------------------- */
+
+-- 4a. artist: fix garbled accent (BeyoncÃ© -> Beyonce)
+UPDATE concert_tours
+SET artist = REPLACE(artist, 'Ã©', 'e');
+
+-- 4b. tour_title: remove everything from the first junk marker onward
+--     (garbled characters, footnotes in brackets, asterisks), then trim spaces
+UPDATE concert_tours
+SET tour_title = trim(regexp_replace(tour_title, 'â€.*|\[.*|\*', '', 'g'));
+
+SELECT artist, tour_title FROM concert_tours ;
+
+
+/* ---------------------------------------------------------------------
+   5. AVERAGE_GROSS: recalculate as gross per show
+   NULLIF(shows, 0) prevents a divide-by-zero error.
+   --------------------------------------------------------------------- */
+
+UPDATE concert_tours
+SET average_gross = actual_gross / NULLIF(shows, 0);
+
+
+/* ---------------------------------------------------------------------
+   6. FINAL CHECK
+   --------------------------------------------------------------------- */
+
+SELECT * FROM concert_tours;
+
+-- Both should return no rows if the text is fully clean
+SELECT DISTINCT artist     FROM concert_tours WHERE artist     ~ '[^ -~]';
+SELECT tour_title          FROM concert_tours WHERE tour_title ~ '[^ -~]|\[|\*';
